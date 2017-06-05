@@ -1,0 +1,77 @@
+#!/bin/bash
+
+usage () { echo "Usage: ${0##/*} { dump | restore | list } <host> <options>"; }
+
+check_dep () {
+    local bin="${1}"
+    local dep="${2:-$1}" # if ! $2, assign $1 to dep
+    
+    if which "${bin}" &> /dev/null; then
+        return 0
+    else
+        install_dep "${dep}"
+    fi
+}
+
+# Has to be refactored
+install_dep () {
+    local dep="${1}"
+    
+    if [ -f /etc/debian_version ]; then
+        sudo apt-get install "${dep}"
+    elif [ -f /etc/redhat-release ]; then
+        [[ "${dep}" =~ mysql ]] && dep="mariadb"
+        sudo yum -y install "${dep}"
+    else
+        echo "Couldn't determine your distro."
+        return 1  
+    fi
+}
+
+check_dep pv || exit 1
+check_dep mysql mysql-client || exit 1
+
+dir="$(dirname $(readlink -f $0))"
+actions="dump restore list"
+opat='-[a-zA-Z]'
+
+if [ -z "${1}" ] || [ -z "${2}" ]; then
+    usage
+    exit 1
+elif ! [[ "${actions}" =~ "${1}" ]]; then
+    usage
+    exit 1
+elif [[ "${2}" =~ ${opat} ]]; then
+    if [[ "${2}" == '-h' || "${2}" == '--help' ]]; then
+        bash "${1}" -h
+        exit 0
+    else
+        echo "Misplaced option '${2}'. You should have specified a host instead."
+        usage
+        exit 1
+    fi
+else	
+    action="${dir}/${1}"
+    host="${2}"
+fi
+
+shift 2
+opts="${@}"
+
+hosts="/root/.records"                                 
+hostdata="$(grep ${host} ${hosts})"
+dbdir="/var/dbs"
+                                                       
+if [ "${hostdata}" ]; then                             
+    export DBHOST=`echo "${hostdata}" | awk -F '[,|]' '{print $2}'`
+    export DBHOSTDIR="${dbdir}/${DBHOST}"
+    export DBADDR=`echo "${hostdata}" | cut -d '|' -f2`
+    ## TO DO: allow users to specify different users/passwords for each host
+    ##export DBUSER=`echo "${hostdata}" | cut -d '|' -f2`
+    ##export DBPW=`echo "${hostdata}" | cut -d '|' -f2`
+else                                                   
+    echo "Couldn't find host: ${host}"              
+    exit 1                                             
+fi                                                     
+
+bash ${action} ${opts}

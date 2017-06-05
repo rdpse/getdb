@@ -1,0 +1,140 @@
+#!/bin/bash
+
+set -e
+
+## ENV VARS: $DBHOSTDIR $DBHOST $DBADDR $DBUSER
+opts="${@}"
+
+usage () {
+cat << EOF
+`tput bold`OPTIONS`tput sgr0`
+  -n          Restore database by name: -n <db_name>
+  -p          Select database from period: -p {latest|today|yesterday}
+              This can only be used with -n and -d
+  -f          Restore database by file: -f <db_filename>
+  -t          Target database. Use this when the source's database's name differs
+              from the destination's.
+ 
+`tput bold`FLAGS`tput sgr0`
+  -d           Restore a full database dump 
+  -h, --help   Print this help message
+EOF
+exit 1
+}
+
+badpair () {
+    if [[ "${opts}" =~ "${1}" ]] && [[ "${opts}" =~ "${2}" ]]; then
+        echo "Options ${1} and ${2} are mutually exclusive."
+	      exit 1
+    fi	
+}
+
+## -- START BORING OPTION CHECKS
+if [[ ${opts} =~ "--help" ]]; then
+    clear
+    usage
+elif [[ ! ${opts} =~ -[a-zA-Z] ]]; then
+    echo "Nonsensical argument '${opts: -1}'."
+    usage
+elif [[ $# -eq 2 && ${1} == "-t" &&  ${2} =~ [a-zA-Z0-9] ]]; then  ## with getopts, an argument-taking option will use 
+    echo "-t can't do anything by itself."                         ## whatever it finds in front of it, even if its another getopts option
+    exit 1
+elif [[ $# -gt 1 && ${opts} =~ "-D" ]]; then
+    echo "-D is a flag and can only be passed by itself."
+    exit 1
+elif [[ ${opts} =~ "-p" && ! (  ${opts} =~ "-n" ||  ${opts} =~ "-d" ) ]]; then
+    echo "The period (-p) option must (only) be used with either -n or -d."
+    exit 1
+fi
+
+badpair "-d" "-n" 
+badpair "-d" "-t"
+badpair "-n" "-f"
+badpair "-f" "-p"
+## -- END BORING OPTION CHECKS
+
+while getopts :dhn:p:f:t: opt; do
+    case "${opt}" in
+        d ) dump=true; dbdir="${DBHOSTDIR}/dump";;
+        h ) usage;;
+        n ) dbname="${OPTARG}" && dbdir="${DBHOSTDIR}/${dbname}";;
+        p ) dbperiod="${OPTARG}";;
+        f ) dbfile="${OPTARG}";;
+        t ) dbtarget="${OPTARG}";;
+       \? ) echo "Unknown option: -${OPTARG}"; usage;;
+        : ) echo "Missing argument for -${OPTARG}"; usage;;
+    esac
+done
+shift "$((OPTIND-1))"
+
+
+lsdb () { [ "${1}" ] && ls -c1 | grep "${1}" || ls -c1; } 
+
+# Target database exists on the mysql server?
+target_exists () {
+    if mysqlshow -h "${DBADDR}" | grep "${dbtarget}"; then
+        return 0                                                
+    else                                                        
+        return 1                                                
+    fi                                                          
+}                                                               
+
+# Do we have a backup for that database?
+
+# Go to the db's backup directory
+if [ -z "${dbfile}" ]; then
+   [[ -d "${dbdir}" ]] && cd "${dbdir}" ||\
+                    { echo "No such dir: ${dbdir}"; exit 1; }
+else
+   db="$(readlink -f ${dbfile})"
+fi
+  
+case ${dbperiod} in
+    'latest' ) 
+        db="$(lsdb | head -1)"
+        ;;
+    'today' ) 
+        today="$(date +%Y-%m-%d)"
+        db="$(lsdb "${today}" | head -1)"
+        ;;
+    'yesterday' )
+        yersterday="$(date -d 'yesterday' +%Y-%m-%d)"
+        db="$(lsdb "${yesterday}" | head -1)"
+        ;;
+esac
+
+
+[ "${db}" ] || { echo "Couldn't find ${db}."; exit 1; }
+
+if [ -z "${dbtarget}" ]; then
+    if [ "${dbfile}" ]; then
+        datexp='([0-9][0-9][0-9][0-9])-([0-9][0-9])-([0-9][0-9])_([0-9][0-9]:[0-9][0-9]:[0-9][0-9])'
+
+        if [[ "${dbfile}" =~ .sql$ ]]; then
+            dbtarget="${dbfile%.sql}"  # use basename instead
+        fi
+
+        if [[ "${dbfile}" =~ $datexp ]]; then
+            dbtarget="${dbfile::-19}"  ## 19 is the length of our date format
+        fi
+    elif [ "${dbname}" ]; then
+        dbtarget="${dbname}"
+    fi
+fi
+
+if ! [ "${dump}" ]; then
+    if target_exists; then
+        echo "~ Pushing ${db} to ${DBHOST}..."
+        xzcat "${db}" | pv | mysql -h "${DBADDR}" "${dbtarget}"
+    else
+        # substitute read -p for echo and ask if we want to create target db.
+        echo "Target database doesn't exist."
+        exit 1
+    fi
+else
+    echo "~ Restoring ${db} to ${DBHOST}..." 
+    xzcat "${db}" | pv | mysql -h "${DBADDR}"
+fi
+
+echo 'Done.'
+exit 0

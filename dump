@@ -1,0 +1,91 @@
+#!/bin/bash
+
+usage () {
+cat << EOF
+Usage: getdb dump <host> [<options>] [<databases>]
+
+`tput bold`OPTIONS`tput sgr0`
+  -A    Dumps all databases
+  -h    Prints this message
+
+  e.g.:  1. getdb pull my_server db1 db2 db3
+         2. getdb pull my_server -A
+EOF
+}
+
+[[ -z "${@}" ]] && usage && exit 1
+[[ "${@}" =~ "--help" ]] && usage && exit 1
+
+while getopts :n:c:Ah opt; do
+    case "${opt}" in
+        A) db="-A";;
+        h) usage;;
+       \?) echo "Unknown option: -${OPTARG}."; usage; exit 1;;
+        :) echo "Missing argument for -${OPTARG}."; exit 1;;
+    esac
+done
+shift "$((OPTIND-1))"
+
+## This needs to be refactored
+[[ "${@}" ]] && [[ -z "${db}" ]] && dbs+=("${@}")
+
+## Should this function be in a separate file, making it more modular?
+dbexists () {
+    if mysqlshow -h "${DBADDR}" | grep "${db}" &> /dev/null; then
+        return 0
+    else
+        return 1
+    fi
+}
+
+dump () {
+    db_sql="${pfxdir}/${pfx}${now}.sql"
+    mysqldump -h "${DBADDR}" "${db}" | pv -tba > "${db_sql}"
+}
+
+compress () {
+    dbfile="${db_sql}.xz"
+
+    echo "~ Compressing ${db_sql}..."
+    if pv "${db_sql}" | xz > "${dbfile}"; then
+        rm -f "${db_sql}"
+        return 0
+    else
+        return 1
+    fi
+}
+
+dump_and_compress () {
+    now=`date +%Y-%m-%d_%H:%M:%S`
+
+    # Create backup dir if it doesn't exist
+    pfxdir="${DBHOSTDIR}/${pfx}"   
+    [ ! -d "${pfxdir}" ] && mkdir -p "${pfxdir}"
+
+    dump     || { rm -f "${db_sql}"; exit 1; }
+    compress || { echo "Couldn't compress backup file."; exit 1; }
+
+    result=$(ls -sh "${dbfile}")
+
+    echo
+    echo "Result: ${result}"
+    echo
+}
+
+if [ "${db}" = '-A' ]; then
+    pfx="dump"
+    echo "~ Dumping all databases from ${DBHOST}..."
+    dump_and_compress &
+else
+    for db in "${dbs[@]}"; do
+        if dbexists; then
+            pfx="${db}"
+            echo "~ Pulling ${db} from ${DBHOST}..."
+            dump_and_compress &
+        else
+            echo "Database "${db}" doesn't seem to exist."
+        fi
+    done
+fi
+
+exit 0
